@@ -1,0 +1,33 @@
+# Secrets — never commit these
+.env
+credentials.json # Gmail OAuth client secret — download from Google Cloud Console
+token.json       # Gmail OAuth token — auto-generated, never commit
+agent_data.db         # legacy SQLite (older runs)
+processed_stories.json
+processed_stories.json.tmp
+learned_preferences.json
+learned_preferences.json.tmp
+
+# Model & trade data — stays on your machine only
+*.joblib
+model_candidate.joblib
+trades.db
+trades_run.db
+trades_test.db
+signals_log.csv
+.atm_iv_history.json
+.model_sharpe.json
+.pcr_history.json
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store

@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FinTech Brief — Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="brand">
+      <p class="eyebrow">FinTech Intelligence</p>
+      <h1>Briefing console</h1>
+      <p class="sub">Run the same pipeline as the CLI — preview HTML locally, or send the real 9 AM-style email when you are ready. Local only; not exposed to the internet.</p>
+    </header>
+
+    <div class="grid grid-bento">
+      <section class="card">
+        <h2>Pipeline</h2>
+        <div class="status-row">
+          <span id="pill" class="pill"><span class="pill-dot"></span><span id="pill-text">Idle</span></span>
+          <span id="meta-duration" class="meta"></span>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="btn-mock">Preview brief <span aria-hidden="true">→</span></button>
+          <p class="hint">Fetches RSS, filters, runs Claude (or fallback), prints full HTML. No Gmail.</p>
+          <button type="button" class="btn btn-danger" id="btn-now">Send via Gmail</button>
+          <p class="hint">Requires <code>RECIPIENT_EMAIL</code>, <code>credentials.json</code>, and OAuth. You will be asked to confirm.</p>
+          <a class="btn btn-ghost" id="btn-download" href="/api/last/brief.html" style="text-decoration: none; display: none;">Download last HTML</a>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Activity log</h2>
+        <div id="log" class="log log-empty">No run yet. Start with Preview brief.</div>
+        <p id="meta-exit" class="meta"></p>
+      </section>
+    </div>
+
+    <section class="card card-wide">
+      <h2>Learn from mistakes</h2>
+      <p class="hint" style="margin:0 0 1rem;">
+        Paste a headline from a brief (or any text). We extract meaningful words and save them to
+        <code>learned_preferences.json</code> — future runs <strong>rank down</strong> or <strong>up</strong> stories whose titles contain those words. Auditable, bounded, no mystery model.
+      </p>
+      <p id="learn-stats" class="meta" style="margin-bottom:0.75rem;"></p>
+      <textarea id="learn-title" class="field-textarea" rows="3" placeholder="e.g. Dogecoin meme rally overshadows bank earnings…"></textarea>
+      <div class="actions" style="flex-direction:row;flex-wrap:wrap;margin-top:0.75rem;">
+        <button type="button" class="btn btn-secondary" id="btn-penalize">This was noise — rank similar lower</button>
+        <button type="button" class="btn btn-primary" id="btn-boost">More like this — rank similar higher</button>
+      </div>
+    </section>
+
+    <footer class="note">
+      CLI equivalent: <code>python fintech_agent.py --mock</code> · <code>python fintech_agent.py --now</code> · Scheduler: <code>python fintech_agent.py</code>.
+      Port: set <code>FB_WEB_PORT</code> in <code>.env</code> (default 5050).
+    </footer>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script>
+    const pill = document.getElementById("pill");
+    const pillText = document.getElementById("pill-text");
+    const logEl = document.getElementById("log");
+    const metaDur = document.getElementById("meta-duration");
+    const metaExit = document.getElementById("meta-exit");
+    const btnMock = document.getElementById("btn-mock");
+    const btnNow = document.getElementById("btn-now");
+    const btnDl = document.getElementById("btn-download");
+    const btnPen = document.getElementById("btn-penalize");
+    const btnBst = document.getElementById("btn-boost");
+    const learnTitle = document.getElementById("learn-title");
+    const learnStats = document.getElementById("learn-stats");
+    const toast = document.getElementById("toast");
+
+    let pollTimer = null;
+
+    function showToast(msg, isError) {
+      toast.textContent = msg;
+      toast.classList.toggle("error", !!isError);
+      toast.classList.add("show");
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => toast.classList.remove("show"), 4200);
+    }
+
+    function setRunning(running, mode) {
+      btnMock.disabled = running;
+      btnNow.disabled = running;
+      btnPen.disabled = running;
+      btnBst.disabled = running;
+      pill.classList.remove("ok", "err", "running");
+      if (running) {
+        pill.classList.add("running");
+        pillText.textContent = mode === "now" ? "Sending…" : "Building brief…";
+      } else {
+        pillText.textContent = "Idle";
+      }
+    }
+
+    function renderLast(last) {
+      if (!last) {
+        metaDur.textContent = "";
+        metaExit.textContent = "";
+        return;
+      }
+      const ok = last.ok;
+      pill.classList.toggle("ok", ok);
+      pill.classList.toggle("err", !ok);
+      pillText.textContent = ok ? "Last run OK" : "Last run failed";
+      metaDur.textContent = last.duration_sec != null ? `Finished in ${last.duration_sec}s` : "";
+      metaExit.textContent =
+        last.returncode != null ? `Exit code ${last.returncode}` : "";
+
+      const stderr = last.stderr || "";
+      const preview = stderr.trim() || "(no stderr)";
+      logEl.textContent = preview;
+      logEl.classList.toggle("log-empty", !stderr.trim());
+
+      if (last.mode === "mock" && last.stdout && ok) {
+        btnDl.style.display = "inline-flex";
+      } else {
+        btnDl.style.display = "none";
+      }
+    }
+
+    async function pollStatus() {
+      const r = await fetch("/api/status");
+      const j = await r.json();
+      setRunning(!!j.running, j.mode);
+      if (!j.running && j.last) {
+        renderLast(j.last);
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    async function startRun(mode, confirm) {
+      const r = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, confirm: !!confirm }),
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        showToast(j.error || "Request failed", true);
+        return;
+      }
+      showToast(mode === "mock" ? "Run started — fetching & analysing…" : "Send started…");
+      setRunning(true, mode);
+      logEl.textContent = "…";
+      logEl.classList.remove("log-empty");
+      pollTimer = setInterval(pollStatus, 800);
+      pollStatus();
+    }
+
+    btnMock.addEventListener("click", () => startRun("mock", false));
+
+    async function refreshLearnSummary() {
+      const r = await fetch("/api/learn/summary");
+      const j = await r.json();
+      if (!j.ok) return;
+      learnStats.textContent = `Saved cues — penalize: ${j.penalty_term_count} terms · boost: ${j.boost_term_count} terms`;
+    }
+
+    async function submitLearn(action) {
+      const title = learnTitle.value.trim();
+      if (!title) {
+        showToast("Paste a headline first.", true);
+        return;
+      }
+      const r = await fetch("/api/learn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, title }),
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        showToast(j.error || "Failed", true);
+        return;
+      }
+      showToast(`Saved ${j.tokens_added?.length || 0} token(s). Next run uses them in ranking.`);
+      learnTitle.value = "";
+      refreshLearnSummary();
+    }
+
+    btnPen.addEventListener("click", () => submitLearn("penalize"));
+    btnBst.addEventListener("click", () => submitLearn("boost"));
+
+    btnNow.addEventListener("click", () => {
+      if (
+        !confirm(
+          "Send the briefing to RECIPIENT_EMAIL via Gmail now? This uses your live OAuth and inbox."
+        )
+      )
+        return;
+      startRun("now", true);
+    });
+
+    pollStatus();
+    refreshLearnSummary();
+    setInterval(() => {
+      if (!pollTimer) pollStatus();
+    }, 4000);
+  </script>
+</body>
+</html>
